@@ -3,6 +3,15 @@
     mcclarj@mail.amc.edu
     19 Jul 2016
     20 Jul 2016 - Added email formating
+    29 Aug 2016 - Changed the Warn and Alert values:
+                          OLD         NEW
+                  WARN    8000        11000
+                  ALERT   11000       20000
+                - Fixed formatting issue with could not connect
+                - Formatted the list with color rows
+                - Added Intro text about "could not connect" and thresholds
+    08 Sep 2016 - Added Free Memory and Uptime columns
+    09 Sep 2016 - Added Total System handle count
     
     
     Description:
@@ -24,14 +33,19 @@
 ------------------------------------------------------------------------------#>
 
 set-variable procToCheck -option Constant -value "svchost"
-set-variable alertValue -option Constant -value "17000"
-set-variable warnValue -option Constant -value "10000"
-set-variable runAsTask -option Constant -value $FALSE
+set-variable alertValue -option Constant -value "20000"
+set-variable warnValue -option Constant -value "11000"
+set-variable runAsTask -option Constant -value $TRUE
+set-variable sendEmail -option Constant -value $TRUE
 
 
 $fromemail = "AMC_EDM_Checks@mail.amc.edu"
 $smtpServer = "smtp.amc.edu"
-$Emailuser = "ISEDMNotification@mail.amc.edu"
+#$Emailuser = "ISEDMNotification@mail.amc.edu", "RohrwaR@mail.amc.edu"
+$Emailuser = "RohrwaR@mail.amc.edu", "mcclarj@mail.amc.edu"
+$bkgndRowColor = "#F1F1F1"
+$alertColor = "Red"
+$warnColor = "DarkOrange"
 
 
 <#------------------------------------------------------------------------------
@@ -45,7 +59,7 @@ $Emailuser = "ISEDMNotification@mail.amc.edu"
 
 ## Format arguments from none, list or text file
 IF ($runAsTask) {
-    $compNames = get-content "E:\Server_Checks\EDM_Servers.txt"
+    $compNames = get-content "D:\Server_Checks\EDM_Servers.txt"
     #$compNames = get-content "C:\Users\mcclarj\Desktop\Server_Info\EDM_Servers.txt"
 }
 ELSE {
@@ -87,19 +101,40 @@ IF ($runAsTask) {
     <body style='font-family:`"Courier New`"'>
         <table border=0 cellspacing=0 cellpadding=0 style='border-collapse:collapse;border:none'>
             <tr>
-                <td width=40% valign=center >
+                <td valign=center colspan=7>
+                    <p><i>This check only tries once to connect to a server. `"Could not connect`" errors are most likely false positives unless there were previous handle warnings.</i><br><br> </p>
+                </td>
+            </tr>
+            <tr>
+                <td valign=center colspan=7>
+                    <p>&emsp;Current thresholds:<br>
+                    <code>&emsp;&emsp;&emsp;&emsp;<font color = `"$warnColor`">Warning = &emsp;$warnValue</font><br>
+                          &emsp;&emsp;&emsp;&emsp;<font color = `"$alertColor`">Alert &emsp;&emsp;= &emsp;$alertValue</font><br><br></code> </p>
+                </td>
+            </tr>
+            <tr><u><b>
+                <td width=20% valign=center >
                     <p>Server Name</p>
                 </td>
-                <td width=20%>
+                <td width=10%>
                     <p>Handles</p>
                 </td>
-                <td width=20%>
+                <td width=10%>
                     <p>ID</p>
                 </td>
-                <td width=20%>
+                <td width=10%>
                     <p>Process Name</p>
                 </td>
-            </tr>"}
+                <td width=10%>
+                    <p>Free Mem</p>
+                </td>
+                <td width=10%>
+                    <p>Total Handles</p>
+                </td>
+                <td width=30%>
+                    <p>Uptime</p>
+                </td>
+            </b></u></tr>"}
 ELSE {write-host $header}
 
 $server = "-----------"
@@ -111,6 +146,7 @@ $id = $id.PadRight(10)
 $procName = "------------"
 $procName = $procName.PadRight(10)
 $header = "$server`t$handles`t$id`t$procName"
+
 IF (!$runAsTask) {write-host $header}
 
 
@@ -120,6 +156,7 @@ FOREACH ($compName in $compNames) {
 
         $array = Get-Process $procToCheck -ComputerName $compName | select @{LABEL='Server';EXPRESSION={$compName}}, @{LABEL='Handles';EXPRESSION={$_.handles}}, @{LABEL='ID';EXPRESSION={$_.Id}}, @{LABEL='Process';EXPRESSION={$_.ProcessName}}
         $max = 0
+        # If multiple services with same name (ex. SVCHost) find the one with the highest count
         FOREACH ($i in $array) 
         { 
             if($max -le $i.handles)
@@ -127,12 +164,12 @@ FOREACH ($compName in $compNames) {
                 $output = $i 
                 $max = $i.handles
                 IF ($max -ge $alertValue) {
-                    $txtColor = "Red"
+                    $txtColor = $alertColor
                     $redAlert = $TRUE
                 }
                 ELSEIF ($max -ge $warnValue){
                     $warnAlert = $TRUE
-                    IF ($runAsTask) {$txtColor = "DarkOrange"}
+                    IF ($runAsTask) {$txtColor = $warnColor}
                     ELSE {$txtColor = "Yellow"}
                 }
                 ELSE {
@@ -145,28 +182,52 @@ FOREACH ($compName in $compNames) {
         $handles = ($output.handles -as [string]).PadRight(10)
         $id = ($output.Id -as [string]).PadRight(10)
         $procName = $output.Process.PadRight(10)
+
+        $upTime = (Get-WmiObject -ComputerName $compName win32_operatingsystem | select CSName, @{LABEL='LastBootUpTime';EXPRESSION={$_.ConverttoDateTime($_.lastbootuptime)}})
+        $upTime =  NEW-TIMESPAN -Start $upTime.lastbootuptime -End ([DateTime]::Now)      
+        $uptime = "$($upTime.Days)d $($uptime.Hours)hrs $($uptime.Minutes)min"
+
+        $totalHandles = (Get-Counter -Counter "\\$compName\Process(_total)\Handle Count").CounterSamples
+        $totalHandles = $totalHandles[0].CookedValue
+
+        $freeMem = Get-WmiObject -Class Win32_OperatingSystem -ComputerName $compName
+        $freeMem = ([math]::round(100 - (((($freemem.TotalVisibleMemorySize - $freemem.FreePhysicalMemory) / $freemem.TotalVisibleMemorySize)) * 100), 0))
+
+
         $line = "$server`t$handles`t$id`t$procName"
         IF ($runAsTask) {
-            $mailMessage += "<tr  style=`"color: $txtColor`">
-                <td width=40% valign=center >
+            $mailMessage += "<tr  style=`"color: $txtColor;background-color:$bkgndRowColor;`">
+                <td width=15% valign=center >
                     <p>$server</p>
                 </td>
-                <td width=20%>
+                <td width=10%>
                     <p>$handles</p>
                 </td>
-                <td width=20%>
+                <td width=10%>
                     <p>$id</p>
                 </td>
-                <td width=20%>
+                <td width=10%>
                     <p>$procName</p>
+                </td>
+                <td width=10%>
+                    <p>$freeMem%</p>
+                </td>
+                <td width=10%>
+                    <p>$totalHandles</p>
+                </td>
+                <td width=35%>
+                    <p>$upTime</p>
                 </td>
             </tr>"}
         ELSE {write-host $line -foregroundcolor $txtColor}
     } ELSE { # If no connection
         IF ($runAsTask) {
-            $mailMessage += "<tr>
-                <td width=40% valign=center span=4>
-                    <p>$compName        ****** Could not connect ******</p>
+            $mailMessage += "<tr  style=`"color: $alertColor;background-color:$bkgndRowColor;`">
+                <td width=15% valign=center>
+                    <p>$compName</p>
+                </td>
+                <td width=85% valign=center colspan=6>
+                    <p>****** Could not connect ******</p>
                 </td>
             </tr>"}
         ELSE {
@@ -174,8 +235,14 @@ FOREACH ($compName in $compNames) {
             $line = $line.PadRight(70)
             Write-Host $line -foregroundcolor "Red" -BackgroundColor "Black"
         }
-        # $redAlert = $TRUE # send email if no connection.  ACUSISFAX1 sends false positives turning this off
-    }    
+        $redAlert = $TRUE # send email if no connection.  ACUSISFAX1 sends false positives turning this off
+    }
+    # Alternate the row background color
+    IF ($bkgndRowColor -eq "#FFF") {
+        $bkgndRowColor = "#F1F1F1"
+    } ELSE {
+        $bkgndRowColor = "#FFF"
+    }
 }
 
 IF ($runAsTask) { # when run as task send the email
@@ -190,6 +257,11 @@ IF ($runAsTask) { # when run as task send the email
         }
     } ELSEIF ($warnAlert){
         $Subject_Text = "Handle Count Warning!"
+        foreach ($users in $EmailUser) {
+            send-mailmessage -from $fromemail -to $users -subject $Subject_Text -BodyAsHTML -body $mailMessage -priority Normal -smtpServer $smtpServer
+        }
+    } ELSEIF ($sendEmail){
+        $Subject_Text = "Handle Count Info"
         foreach ($users in $EmailUser) {
             send-mailmessage -from $fromemail -to $users -subject $Subject_Text -BodyAsHTML -body $mailMessage -priority Normal -smtpServer $smtpServer
         }
